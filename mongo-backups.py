@@ -16,13 +16,9 @@ import sys
 import time
 import string
 import tempfile
+import lvm
+import math
 
-
-# FIXME
-try:
-    import lvm  # noqa
-except ImportError:
-    pass
 
 
 def parse_args():
@@ -75,9 +71,11 @@ def parse_args():
 
 
 class MongoBackups:
-    def __init__(self, mongo_name, aws_region):
+    def __init__(self, mongo_name, aws_region, vg_name, lv_name):
         self.mongo_name = mongo_name
         self.aws_region = aws_region
+        self.vg_name = vg_name
+        self.lv_name = lv_name
 
         # A dict which will hold stats that are added to the snapshot as tags
         # and will be used for reporting.
@@ -243,11 +241,38 @@ class MongoBackups:
 
         return self.client.delete_volume(VolumeId=volume_id)
 
+    @property
+    def physical_block_devices(self):
+        """ Return a list of physical block devices within the VG. """
+
+        vg = lvm.vgOpen(self.vg_name, 'r')
+        physical_block_devices = []
+        for pv in vg.listPVs():
+            physical_block_devices.append(pv.getName())
+        return physical_block_devices
+
+    @property
+    def logical_volume(self):
+        """ Return some information about the logical volume. """
+
+        vg = lvm.vgOpen(self.vg_name, 'r')
+        data = {'lvsize': 0}
+        for lv in vg.listLVs():
+            # getSize() is in Bytes.
+            data['lvsize'] = (
+                data['lvsize'] + (lv.getSize() / (1024*1024*1024))
+            )
+        # round up size to produce Gb.
+        data['lvsize'] = math.ceil(data['lvsize'])
+
+        return data
 
 def main():
     args = parse_args()
 
-    mongo_backups = MongoBackups(args.mongo_name, args.aws_region)
+    mongo_backups = MongoBackups(
+        args.mongo_name, args.aws_region, args.vg_name, args.lv_name
+    )
 
     mongo_backups.stats['date_started'] = dt.now().isoformat()
 
@@ -259,7 +284,8 @@ def main():
         print(mongo_backups.instance_id)
         pprint.pprint(_filter, indent=4)
         pprint.pprint(volumes['Volumes'], indent=4)
-
+        print(mongo_backups.physical_block_devices)
+        print(mongo_backups.logical_volume)
     elif args.action == 'latest_block_device':
         print(mongo_backups.get_latest_block_device())
     elif args.action == 'backup':
@@ -267,13 +293,23 @@ def main():
 
             attached_instance_id = volume['Attachments'][0]['InstanceId']
             attached_device = volume['Attachments'][0]['Device']
+
+            # Confirm that the live volume we are checking belongs to this
+            # instance and shares the same block device attachment. If we dont
+            # do this, we could backup a mongo instance we dont want backing
+            # up.
             if (attached_instance_id == mongo_backups.instance_id and
                     attached_device == args.physical_block_device):
 
-                # Create new volume based off existing live attached volume.
-                print("DEBUG: creating a new volume.")
-                size = volume['Size']
+                # Create new volume based with the same size as the logical
+                # volume.
+                size = mongo_backups.logical_volume['lvsize']
                 volume_type = volume['VolumeType']
+                print(
+                    "DEBUG: creating a new volume "
+                    "{size={0}GB, volume_type{1}}."
+                    .format(size, volume_type)
+                )
                 new_volume = mongo_backups.ebs_create_volume(
                     size, volume_type
                 )
@@ -357,14 +393,14 @@ def main():
                 subprocess.call(
                     'lvcreate -L300M -s -n lvsnap '
                     '/dev/mapper/{0}-{1}'
-                    .format(args.vg_name, args.lv_name),
+                    .format(mongo_backups.vg_name, mongo_backups.lv_name),
                     shell=True
                 )
 
                 # Mount LVM snapshot in read-only.
                 subprocess.call(
                     'mount -o nouuid,ro /dev/{0}/lvsnap {1}'.
-                    format(args.vg_name, temp_mount_point_lvsnap),
+                    format(mongo_backups.vg_name, temp_mount_point_lvsnap),
                     shell=True
                 )
 
@@ -396,7 +432,7 @@ def main():
 
                 # Remove the LVM snapshot.
                 subprocess.call(
-                    'lvremove -y /dev/{0}/lvsnap'.format(args.vg_name),
+                    'lvremove -y /dev/{0}/lvsnap'.format(mongo_backups.vg_name),
                     shell=True
                 )
 
