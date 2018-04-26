@@ -308,6 +308,11 @@ resource "aws_instance" "customerB" {
     destination = "/srv/"
   }
 
+  provisioner "file" {
+    source      = "resources/generate_data.sh"
+    destination = "/root/generate_data.sh"
+  }
+
   lifecycle {
     ignore_changes = ["user_data"]
   }

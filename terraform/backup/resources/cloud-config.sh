@@ -64,3 +64,11 @@ git clone https://github.com/rene00/mongo-backups.git
 /opt/virtualenvs/mongo-backups/bin/pip3 install -r \
     /root/mongo-backups/requirements.txt
 popd
+
+# Generate some mongo data
+while sleep 1; do
+    if test -f /root/generate_data.sh; then
+        bash -x /root/generate_data.sh
+        break
+    fi
+done
