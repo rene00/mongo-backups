@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
+__VERSION__ = '0.1'
+
 from pymongo import MongoClient
+from datetime import datetime as dt
 import argparse
 import boto3
 import fnmatch
@@ -13,6 +16,7 @@ import sys
 import time
 import string
 import tempfile
+
 
 # FIXME
 try:
@@ -74,6 +78,10 @@ class MongoBackups:
     def __init__(self, mongo_name, aws_region):
         self.mongo_name = mongo_name
         self.aws_region = aws_region
+
+        # A dict which will hold stats that are added to the snapshot as tags
+        # and will be used for reporting.
+        self.stats = {}
 
     @property
     def session(self):
@@ -174,6 +182,8 @@ class MongoBackups:
         )
         description = name
 
+        self.stats['date_finished'] = dt.now().isoformat()
+
         resp = self.client.create_snapshot(
             Description=description, VolumeId=volume_id,
             TagSpecifications=[
@@ -195,6 +205,22 @@ class MongoBackups:
                         {
                             'Key': 'MongoName',
                             'Value': self.mongo_name,
+                        },
+                        {
+                            'Key': 'MongoBackups',
+                            'Value': 'True',
+                        },
+                        {
+                            'Key': 'DateStarted',
+                            'Value': self.stats['date_started'],
+                        },
+                        {
+                            'Key': 'DateFinished',
+                            'Value': self.stats['date_finished'],
+                        },
+                        {
+                            'Key': 'MongoBackupsVersion',
+                            'Value': __VERSION__,
                         }
                     ],
                 }
@@ -222,6 +248,8 @@ def main():
     args = parse_args()
 
     mongo_backups = MongoBackups(args.mongo_name, args.aws_region)
+
+    mongo_backups.stats['date_started'] = dt.now().isoformat()
 
     _filter = mongo_backups.snapshot_filter
     volumes = mongo_backups.client.describe_volumes(Filters=_filter)
@@ -374,7 +402,9 @@ def main():
 
                 # Create a snapshot of the new volume which now has a copy
                 # of the database.
-                snapshot = mongo_backups.ebs_snapshot(new_volume['VolumeId'])
+                snapshot = mongo_backups.ebs_create_snapshot(
+                    new_volume['VolumeId']
+                )
 
                 # Detach the new volume.
                 print(
@@ -400,7 +430,7 @@ def main():
 
                 print(
                     "DEBUG: backup complete on snapshot {0}"
-                    .format(snapshot)
+                    .format(snapshot['SnapshotId'])
                 )
 
 
