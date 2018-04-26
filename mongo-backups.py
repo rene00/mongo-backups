@@ -446,6 +446,7 @@ def main():
 
                 # Lock mongo.
                 if args.mongo_lock:
+                    print("DEBUG: locking mongo.")
                     conn = MongoClient('mongodb://127.0.0.1:27017')
                     conn.fsync(lock=True)
 
@@ -476,6 +477,7 @@ def main():
 
                 # Unlock mongo.
                 if args.mongo_lock:
+                    print("DEBUG: unlocking mongo.")
                     conn.unlock()
 
                 # Unmount the LVM snapshot
