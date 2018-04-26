@@ -6,6 +6,15 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin:/root/bin
 
 apt-get update -y
 
+for device in xvdb xvdc xvdd; do
+    while test ! -b /dev/$device; do
+        sleep 1
+    done
+done
+
+mkswap /dev/xvdb
+swapon /dev/xvdb
+
 # LVM and mongodb mount point.
 apt-get install lvm2 xfsprogs
 pvcreate /dev/xvd[cd]
@@ -46,6 +55,7 @@ EOF
 salt-call --local state.highstate -l info
 
 # Prepare for mongo-backups
+pushd /root
 apt-get install -y git virtualenvwrapper python3-lvm2
 mkdir -p /opt/virtualenvs
 virtualenv --python=`which python3` --system-site-packages \
@@ -53,6 +63,4 @@ virtualenv --python=`which python3` --system-site-packages \
 git clone https://github.com/rene00/mongo-backups.git
 /opt/virtualenvs/mongo-backups/bin/pip3 install -r \
     /root/mongo-backups/requirements.txt
-
-
-
+popd
