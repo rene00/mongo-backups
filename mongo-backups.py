@@ -173,7 +173,7 @@ class MongoBackups:
         if snapshot_id:
             # wait till snapshot has completed first.
             print(
-                "DEBUG: waiting for snapshot to complete [{0}].".
+                "DEBUG: checking that snapshot is complete [{0}].".
                 format(snapshot_id)
             )
             waiter = self.client.get_waiter('snapshot_completed')
