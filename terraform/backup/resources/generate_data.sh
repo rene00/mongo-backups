@@ -11,7 +11,7 @@ x=1
 while [ $x -le ${ROUNDS} ]; do
   for i in *.json; do
         collection=$(echo $i | cut -d . -f 1)
-        echo mongoimport -d mydb -c ${collection}${x} --file ${i}
+        mongoimport -d mydb -c ${collection}${x} --file ${i}
   done
   x=$(( $x + 1 ))
 done
