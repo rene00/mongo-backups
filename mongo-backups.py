@@ -18,7 +18,9 @@ import string
 import tempfile
 import lvm
 import math
+import tzlocal
 
+TZ = tzlocal.get_localzone()
 
 
 def parse_args():
@@ -55,17 +57,22 @@ def parse_args():
     parser.add_argument(
         '--vg-name', dest='vg_name',
         required=False, default='vgmongo',
-        help=('The LVM volume group name (eg; vgmongo)')
+        help=('The LVM volume group name (eg; vgmongo).')
     )
     parser.add_argument(
         '--lv-name', dest='lv_name',
         required=False, default='lvmongo',
-        help=('The LVM logical volume name (eg; lvmongo)')
+        help=('The LVM logical volume name (eg; lvmongo).')
     )
     parser.add_argument(
         '--mongo-lock', dest='mongo_lock', action='store_true',
         default=False,
-        help=('Lock Mongo before performing snapshot')
+        help=('Lock Mongo before performing snapshot.')
+    )
+    parser.add_argument(
+        '--seed-from-last-snapshot', dest='seed_from_last_snapshot',
+        action='store_true', default=False,
+        help=('Seed the volume from the last snapshot.')
     )
     return parser.parse_args()
 
@@ -159,16 +166,31 @@ class MongoBackups:
         return next_free_block_device
 
     def ebs_create_volume(self, size, volume_type, encrypted=True,
-                          availability_zone=None):
+                          availability_zone=None, snapshot_id=None):
         """ Create an EBS volume."""
 
         if not availability_zone:
             availability_zone = self.instance.placement['AvailabilityZone']
 
-        return self.client.create_volume(
-            Size=size, AvailabilityZone=availability_zone,
-            VolumeType=volume_type, Encrypted=True,
-        )
+        kwargs = {
+            'AvailabilityZone': availability_zone,
+            'VolumeType': volume_type,
+            'Encrypted': encrypted
+        }
+
+        if snapshot_id:
+            # wait till snapshot has completed first.
+            print(
+                "DEBUG: waiting for snapshot to complete [{0}].".
+                format(snapshot_id)
+            )
+            waiter = self.client.get_waiter('snapshot_completed')
+            waiter.wait(SnapshotIds=[snapshot_id])
+            kwargs['SnapshotId'] = snapshot_id
+        else:
+            kwargs['Size'] = size
+
+        return self.client.create_volume(**kwargs)
 
     def ebs_create_snapshot(self, volume_id):
         """ Perform an EBS snapshot on volume_id. """
@@ -267,6 +289,31 @@ class MongoBackups:
 
         return data
 
+    @property
+    def last_snapshot(self):
+        """ Return a dict which represents the last snapshot. """
+
+        _filter = [
+            {'Name': 'tag:MongoName', 'Values': [self.mongo_name]},
+            {'Name': 'tag:MongoBackups', 'Values': ['True']},
+        ]
+
+        snapshots = self.client.describe_snapshots(Filters=_filter)
+
+        last_snapshot = {
+            'date': TZ.localize(dt(1970, 1, 1)),
+            'snapshot_id': None
+        }
+
+        for snapshot in snapshots['Snapshots']:
+            start_time = snapshot['StartTime']
+            if start_time > last_snapshot['date']:
+                last_snapshot['date'] = snapshot['StartTime']
+                last_snapshot['snapshot_id'] = snapshot['SnapshotId']
+
+        return last_snapshot
+
+
 def main():
     args = parse_args()
 
@@ -286,6 +333,7 @@ def main():
         pprint.pprint(volumes['Volumes'], indent=4)
         print(mongo_backups.physical_block_devices)
         print(mongo_backups.logical_volume)
+        print(mongo_backups.last_snapshot)
     elif args.action == 'latest_block_device':
         print(mongo_backups.get_latest_block_device())
     elif args.action == 'backup':
@@ -301,45 +349,65 @@ def main():
             if (attached_instance_id == mongo_backups.instance_id and
                     attached_device == args.physical_block_device):
 
-                # Create new volume based with the same size as the logical
-                # volume.
+                # Create new volume.
                 size = mongo_backups.logical_volume['lvsize']
                 volume_type = volume['VolumeType']
-                print(
-                    "DEBUG: creating a new volume "
-                    "[size={0}GB, volume_type{1}]."
-                    .format(size, volume_type)
-                )
-                new_volume = mongo_backups.ebs_create_volume(
-                    size, volume_type
-                )
+
+                if args.seed_from_last_snapshot:
+                    print(
+                        "DEBUG: creating a new volume from the last "
+                        "snapshot [snapshot_id={0}, volume_type={1}]."
+                        .format(
+                            mongo_backups.last_snapshot['snapshot_id'],
+                            volume_type
+                        )
+                    )
+                    if not mongo_backups.last_snapshot['snapshot_id']:
+                        print("DEBUG: no snapshots exist yet.")
+                        sys.exit(2)
+                    else:
+                        new_volume = mongo_backups.ebs_create_volume(
+                            size=None, volume_type=volume_type,
+                            snapshot_id=(
+                                mongo_backups.last_snapshot['snapshot_id']
+                            )
+                        )
+                else:
+                    print(
+                        "DEBUG: creating a new volume "
+                        "[size={0}GB, volume_type={1}]."
+                        .format(size, volume_type)
+                    )
+                    new_volume = mongo_backups.ebs_create_volume(
+                        size, volume_type
+                    )
 
                 # Wait for new volume to be available.
                 print(
-                    "DEBUG: waiting for new volume {0} to become available."
+                    "DEBUG: waiting for new volume to become available [{0}]."
                     .format(new_volume['VolumeId'])
                 )
                 waiter = mongo_backups.client.get_waiter('volume_available')
                 waiter.wait(VolumeIds=[new_volume['VolumeId']])
                 print(
-                    "DEBUG: volume {0} available".
+                    "DEBUG: volume available [{0}].".
                     format(new_volume['VolumeId'])
                 )
 
                 last_block_device = mongo_backups.get_latest_block_device()
                 print(
-                    "DEBUG: last block device attached is {0}".
+                    "DEBUG: last block device attached [{0}].".
                     format(last_block_device)
                 )
 
                 # Attach newly created volume.
                 attach_device = mongo_backups.get_next_free_block_device()
                 print(
-                    "DEBUG: next available block device is {0}"
+                    "DEBUG: next available block device found [{0}]"
                     .format(attach_device)
                 )
                 print(
-                    "DEBUG: attaching {0} as {1}".
+                    "DEBUG: attaching volume [volume_id={0}, device={1}].".
                     format(new_volume['VolumeId'], attach_device)
                 )
                 mongo_backups.client.attach_volume(
@@ -358,7 +426,7 @@ def main():
                     print("DEBUG: waiting for new block device to attach.")
                     if last_block_device != latest_block_device:
                         print(
-                            "DEBUG: new block device {0} attached.".
+                            "DEBUG: new block device attached [{0}].".
                             format(latest_block_device)
                         )
                         break
