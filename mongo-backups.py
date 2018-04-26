@@ -37,14 +37,6 @@ def parse_args():
         help='The name of the AWS region the mongo cluster exists within.'
     )
     parser.add_argument(
-        '--physical-block-device', dest='physical_block_device',
-        required=False, default='/dev/xvde',
-        help=(
-            'FIXME: the name of the physical block device that belongs to '
-            'the volume group.'
-        )
-    )
-    parser.add_argument(
         '--wait-time', dest='wait_time', type=int,
         required=False, default=60,
         help=('The time in seconds to wait for some operations to complete.')
@@ -347,7 +339,7 @@ def main():
             # do this, we could backup a mongo instance we dont want backing
             # up.
             if (attached_instance_id == mongo_backups.instance_id and
-                    attached_device == args.physical_block_device):
+                    attached_device in mongo_backups.physical_block_devices):
 
                 # Create new volume.
                 size = mongo_backups.logical_volume['lvsize']
@@ -536,6 +528,8 @@ def main():
                     "DEBUG: backup complete on snapshot {0}"
                     .format(snapshot['SnapshotId'])
                 )
+
+                sys.exit(0)
 
 
 if __name__ == '__main__':
