@@ -153,7 +153,7 @@ resource "aws_iam_instance_profile" "restore" {
 }
 
 resource "aws_instance" "restore" {
-  instance_type           = "t2.micro"
+  instance_type           = "t2.medium"
   key_name                = "${aws_key_pair.restore.key_name}"
   monitoring              = true
   disable_api_termination = false
