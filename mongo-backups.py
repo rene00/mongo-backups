@@ -307,7 +307,7 @@ def main():
                 volume_type = volume['VolumeType']
                 print(
                     "DEBUG: creating a new volume "
-                    "{size={0}GB, volume_type{1}}."
+                    "[size={0}GB, volume_type{1}]."
                     .format(size, volume_type)
                 )
                 new_volume = mongo_backups.ebs_create_volume(
