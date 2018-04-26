@@ -114,7 +114,7 @@ class MongoBackups:
         return response.text
 
     @property
-    def snapshot_filter(self):
+    def volume_filter(self):
         """ Return a list of dicts which can be supplied as a filter to
             boto3's describe_volumes(). """
 
@@ -315,7 +315,7 @@ def main():
 
     mongo_backups.stats['date_started'] = dt.now().isoformat()
 
-    _filter = mongo_backups.snapshot_filter
+    _filter = mongo_backups.volume_filter
     volumes = mongo_backups.client.describe_volumes(Filters=_filter)
 
     if args.action == 'dump':
