@@ -233,8 +233,8 @@ class MongoBackups:
                         {
                             'Key': 'MongoBackupsVersion',
                             'Value': __VERSION__,
-                        }
-                    ],
+                        },
+                    ] + self.stats['rsync_stats'],
                 }
             ]
         )
@@ -304,6 +304,30 @@ class MongoBackups:
                 last_snapshot['snapshot_id'] = snapshot['SnapshotId']
 
         return last_snapshot
+
+    def capture_rsync_stats(self, rsync_output):
+        """ Take output from rsnapshot and store statistics in stats
+            member. """
+
+        rsync_output = rsync_output.split(b'\n')
+        self.stats['rsync_stats'] = []
+
+        for output_line in rsync_output:
+            output_line = output_line.decode()
+            output_line = output_line.replace(",", "")
+            regex = (
+                r'^(?P<key>(File|Number|Total|Literal|Matched)[a-z\s]+)'
+                ':\s(?P<value>[0-9+|[0-9\.]+)'
+            )
+            found = re.search(regex, output_line)
+            if found:
+                _key = found.groupdict()['key']
+                _value = found.groupdict()['value']
+                _key = _key.lower().replace(' ', '_')
+                self.stats['rsync_stats'].append(
+                    {'Key': 'rsync_{0}'.format(_key), 'Value': _value}
+                )
+        return self.stats
 
 
 def main():
@@ -471,14 +495,17 @@ def main():
                 )
 
                 # Rsync LVM snapshot to new volume.
-                subprocess.call(
-                    'rsync -avh --delete -p {0}/* {1}/'.
+                print("DEBUG: performing rsync.")
+                rsync_output = subprocess.check_output(
+                    'rsync -a --stats --delete --ignore-missing-args '
+                    '-p {0}/* {1}/'.
                     format(
                         temp_mount_point_lvsnap,
                         temp_mount_point_new_volume
                     ),
                     shell=True
                 )
+                mongo_backups.capture_rsync_stats(rsync_output)
 
                 # Unmount the LVM snapshot
                 subprocess.call(
