@@ -528,6 +528,10 @@ def main():
 
                 # Create a snapshot of the new volume which now has a copy
                 # of the database.
+                print(
+                    "DEBUG: create snapshot from volume [{0}]."
+                    .format(new_volume['VolumeId'])
+                )
                 snapshot = mongo_backups.ebs_create_snapshot(
                     new_volume['VolumeId']
                 )
