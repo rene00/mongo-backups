@@ -458,6 +458,11 @@ def main():
                     shell=True
                 )
 
+                # Unlock mongo.
+                if args.mongo_lock:
+                    print("DEBUG: unlocking mongo.")
+                    conn.unlock()
+
                 # Mount LVM snapshot in read-only.
                 subprocess.call(
                     'mount -o nouuid,ro /dev/{0}/lvsnap {1}'.
@@ -475,11 +480,6 @@ def main():
                     shell=True
                 )
 
-                # Unlock mongo.
-                if args.mongo_lock:
-                    print("DEBUG: unlocking mongo.")
-                    conn.unlock()
-
                 # Unmount the LVM snapshot
                 subprocess.call(
                     'umount {0}'.format(temp_mount_point_lvsnap),
@@ -494,7 +494,8 @@ def main():
 
                 # Remove the LVM snapshot.
                 subprocess.call(
-                    'lvremove -y /dev/{0}/lvsnap'.format(mongo_backups.vg_name),
+                    'lvremove -y /dev/{0}/lvsnap'.
+                    format(mongo_backups.vg_name),
                     shell=True
                 )
 
