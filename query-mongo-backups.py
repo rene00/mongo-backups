@@ -85,7 +85,16 @@ class QueryMongoBackups:
                 'MongoName': tag_search('MongoName', tags),
                 'InstanceId': tag_search('InstanceId', tags),
             }
-            snapshots[human_readable_start_time] = snapshot_data
+
+            rsync_stats = {}
+            for tag in tags:
+                if tag['Key'].startswith('rsync_'):
+                    rsync_stats[tag['Key']] = tag['Value']
+
+            # include all rsync stats
+            data = {**snapshot_data, **rsync_stats}
+            od = collections.OrderedDict(sorted(data.items()))
+            snapshots[human_readable_start_time] = od
 
         snapshots_ordered_by_date = collections.OrderedDict()
         for key, value in sorted(
@@ -98,7 +107,12 @@ class QueryMongoBackups:
 
 
 def main():
+
+    if sys.version_info <= (3, 5):
+        sys.exit('You must use python 3.5 or greater.')
+
     args = parse_args()
+
     mongo_backups = QueryMongoBackups(
         args.mongo_name, args.aws_region, args.limit
     )
