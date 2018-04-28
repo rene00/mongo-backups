@@ -95,6 +95,17 @@ class MongoBackups:
         self.log_next_sequence_token = None
 
     def log(self, message, console=True):
+        """ Log message.
+
+        By default, log message to the console. If console=False, no message
+        will be sent to the console.
+
+        If self.log_group_name has been set, attempt to create the log
+        stream name for this backup. Once log stream name created, send
+        message to stream.
+
+        """
+
         if console:
             logger.info(message)
         if self.log_group_name and self.log_group_name:
@@ -115,6 +126,7 @@ class MongoBackups:
 
     @property
     def log_stream_name(self):
+        """ The log stream name. """
 
         log_stream_name = None
         try:
