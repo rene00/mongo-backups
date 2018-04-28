@@ -11,7 +11,6 @@ import os
 import re
 import requests
 import subprocess
-import pprint   # noqa
 import sys
 import time
 import string
@@ -19,8 +18,16 @@ import tempfile
 import lvm
 import math
 import tzlocal
+import logging
+import json
 
 TZ = tzlocal.get_localzone()
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+logging.getLogger('botocore').setLevel(logging.WARN)
+logging.getLogger('boto3').setLevel(logging.WARN)
+logging.getLogger('requests').setLevel(logging.WARN)
+logger = logging.getLogger(__name__)
 
 
 def parse_args():
@@ -43,8 +50,8 @@ def parse_args():
     )
     parser.add_argument(
         '--action', dest='action', nargs='?',
-        choices=('dump', 'backup', 'latest_block_device'),
-        default='dump'
+        choices=('dev', 'backup'),
+        default='backup', help=('Choose backup here.')
     )
     parser.add_argument(
         '--vg-name', dest='vg_name',
@@ -66,11 +73,15 @@ def parse_args():
         action='store_true', default=False,
         help=('Seed the volume from the last snapshot.')
     )
+    parser.add_argument(
+        '--cloudwatch-log-group-name', dest='log_group_name',
+        default=None, help=('CloudWatch log group name.')
+    )
     return parser.parse_args()
 
 
 class MongoBackups:
-    def __init__(self, mongo_name, aws_region, vg_name, lv_name):
+    def __init__(self, mongo_name, aws_region, vg_name, lv_name, **kwargs):
         self.mongo_name = mongo_name
         self.aws_region = aws_region
         self.vg_name = vg_name
@@ -79,6 +90,64 @@ class MongoBackups:
         # A dict which will hold stats that are added to the snapshot as tags
         # and will be used for reporting.
         self.stats = {}
+
+        self.log_group_name = kwargs.get('log_group_name')
+        self.log_next_sequence_token = None
+
+    def log(self, message, console=True):
+        if console:
+            logger.info(message)
+        if self.log_group_name and self.log_group_name:
+            kwargs = {
+                'logGroupName': self.log_group_name,
+                'logStreamName': self.log_stream_name,
+                'logEvents': [
+                    {
+                        'timestamp': int(time.time() * 1000),
+                        'message': message,
+                    }
+                ],
+            }
+            if self.log_next_sequence_token:
+                kwargs['sequenceToken'] = self.log_next_sequence_token
+            response = self.logs_client.put_log_events(**kwargs)
+            self.log_next_sequence_token = response['nextSequenceToken']
+
+    @property
+    def log_stream_name(self):
+
+        log_stream_name = None
+        try:
+            log_stream_name = self.__log_stream_name
+        except AttributeError:
+            # If user has specified a log_group_name and the log stream
+            # hasnt been created, create one.
+            if self.log_group_name:
+                new_log_stream_name = (
+                    '{0}-{1}-{2}'.
+                    format(
+                        self.mongo_name,
+                        self.instance_id,
+                        int((time.time() + 0.5) * 1000)
+                    )
+                )
+                self.logs_client.create_log_stream(
+                    logGroupName=self.log_group_name,
+                    logStreamName=new_log_stream_name
+                )
+                self.log_stream_name = new_log_stream_name
+                log_stream_name = self.log_stream_name
+                self.log(
+                    "Creating CloudWatch log stream [log_group={0}, "
+                    "log_stream={1}].".
+                    format(self.log_group_name, self.log_stream_name)
+                )
+
+        return log_stream_name
+
+    @log_stream_name.setter
+    def log_stream_name(self, log_stream_name):
+        self.__log_stream_name = log_stream_name
 
     @property
     def session(self):
@@ -97,6 +166,12 @@ class MongoBackups:
         """ An EC2 session resource connection. """
 
         return self.session.resource('ec2', self.aws_region)
+
+    @property
+    def logs_client(self):
+        """ A client connection to CloudWatch Logs. """
+
+        return self.session.client('logs', self.aws_region)
 
     @property
     def instance(self):
@@ -172,8 +247,8 @@ class MongoBackups:
 
         if snapshot_id:
             # wait till snapshot has completed first.
-            print(
-                "DEBUG: checking that snapshot is complete [{0}].".
+            self.logs(
+                "Checking that snapshot is complete [{0}].".
                 format(snapshot_id)
             )
             waiter = self.client.get_waiter('snapshot_completed')
@@ -196,48 +271,30 @@ class MongoBackups:
 
         self.stats['date_finished'] = dt.now().isoformat()
 
+        self.snapshot_tags = [
+            {'Key': 'InstanceId', 'Value': self.instance_id},
+            {'Key': 'Name', 'Value': name},
+            {'Key': 'Description', 'Value': description},
+            {'Key': 'MongoName', 'Value': self.mongo_name},
+            {'Key': 'MongoBackups', 'Value': 'True'},
+            {'Key': 'DateStarted', 'Value': self.stats['date_started']},
+            {'Key': 'DateFinished', 'Value': self.stats['date_finished']},
+            {'Key': 'MongoBackupsVersion', 'Value': __VERSION__}
+        ]
+
+        # append rsync stats to tags.
+        self.snapshot_tags = self.snapshot_tags + self.stats['rsync_stats']
+
         resp = self.client.create_snapshot(
             Description=description, VolumeId=volume_id,
             TagSpecifications=[
                 {
                     'ResourceType': 'snapshot',
-                    'Tags': [
-                        {
-                            'Key': 'InstanceId',
-                            'Value': self.instance_id,
-                        },
-                        {
-                            'Key': 'Name',
-                            'Value': name,
-                        },
-                        {
-                            'Key': 'Description',
-                            'Value': description,
-                        },
-                        {
-                            'Key': 'MongoName',
-                            'Value': self.mongo_name,
-                        },
-                        {
-                            'Key': 'MongoBackups',
-                            'Value': 'True',
-                        },
-                        {
-                            'Key': 'DateStarted',
-                            'Value': self.stats['date_started'],
-                        },
-                        {
-                            'Key': 'DateFinished',
-                            'Value': self.stats['date_finished'],
-                        },
-                        {
-                            'Key': 'MongoBackupsVersion',
-                            'Value': __VERSION__,
-                        },
-                    ] + self.stats['rsync_stats'],
+                    'Tags': self.snapshot_tags
                 }
             ]
         )
+
         return resp
 
     def ebs_detach_volume(self, volume_id, device):
@@ -334,7 +391,8 @@ def main():
     args = parse_args()
 
     mongo_backups = MongoBackups(
-        args.mongo_name, args.aws_region, args.vg_name, args.lv_name
+        args.mongo_name, args.aws_region, args.vg_name, args.lv_name,
+        log_group_name=args.log_group_name
     )
 
     mongo_backups.stats['date_started'] = dt.now().isoformat()
@@ -342,17 +400,7 @@ def main():
     _filter = mongo_backups.volume_filter
     volumes = mongo_backups.client.describe_volumes(Filters=_filter)
 
-    if args.action == 'dump':
-        print(mongo_backups.aws_region)
-        print(mongo_backups.instance_id)
-        pprint.pprint(_filter, indent=4)
-        pprint.pprint(volumes['Volumes'], indent=4)
-        print(mongo_backups.physical_block_devices)
-        print(mongo_backups.logical_volume)
-        print(mongo_backups.last_snapshot)
-    elif args.action == 'latest_block_device':
-        print(mongo_backups.get_latest_block_device())
-    elif args.action == 'backup':
+    if args.action == 'backup':
         for volume in volumes['Volumes']:
 
             attached_instance_id = volume['Attachments'][0]['InstanceId']
@@ -370,8 +418,8 @@ def main():
                 volume_type = volume['VolumeType']
 
                 if args.seed_from_last_snapshot:
-                    print(
-                        "DEBUG: creating a new volume from the last "
+                    mongo_backups.log(
+                        "Creating a new volume from the last "
                         "snapshot [snapshot_id={0}, volume_type={1}]."
                         .format(
                             mongo_backups.last_snapshot['snapshot_id'],
@@ -379,7 +427,7 @@ def main():
                         )
                     )
                     if not mongo_backups.last_snapshot['snapshot_id']:
-                        print("DEBUG: no snapshots exist yet.")
+                        mongo_backups.log("No snapshots exist yet.")
                         sys.exit(2)
                     else:
                         new_volume = mongo_backups.ebs_create_volume(
@@ -389,9 +437,8 @@ def main():
                             )
                         )
                 else:
-                    print(
-                        "DEBUG: creating a new volume "
-                        "[size={0}GB, volume_type={1}]."
+                    mongo_backups.log(
+                        "Creating a new volume [size={0}GB, volume_type={1}]."
                         .format(size, volume_type)
                     )
                     new_volume = mongo_backups.ebs_create_volume(
@@ -399,31 +446,32 @@ def main():
                     )
 
                 # Wait for new volume to be available.
-                print(
-                    "DEBUG: waiting for new volume to become available [{0}]."
+                mongo_backups.log(
+                    "Waiting for new volume to become available [{0}]."
                     .format(new_volume['VolumeId'])
                 )
                 waiter = mongo_backups.client.get_waiter('volume_available')
                 waiter.wait(VolumeIds=[new_volume['VolumeId']])
-                print(
-                    "DEBUG: volume available [{0}].".
-                    format(new_volume['VolumeId'])
+                mongo_backups.log(
+                    "Volume available [{0}].".format(new_volume['VolumeId'])
                 )
 
                 last_block_device = mongo_backups.get_latest_block_device()
-                print(
-                    "DEBUG: last block device attached [{0}].".
+                mongo_backups.log(
+                    "Last block device attached [{0}].".
                     format(last_block_device)
                 )
 
-                # Attach newly created volume.
+                # Found next free block device.
                 attach_device = mongo_backups.get_next_free_block_device()
-                print(
-                    "DEBUG: next available block device found [{0}]"
-                    .format(attach_device)
+                mongo_backups.log(
+                    "Next available block device found [{0}].".
+                    format(attach_device)
                 )
-                print(
-                    "DEBUG: attaching volume [volume_id={0}, device={1}].".
+
+                # Attach volume to instance.
+                mongo_backups.log(
+                    "Attaching volume [volume_id={0}, device={1}].".
                     format(new_volume['VolumeId'], attach_device)
                 )
                 mongo_backups.client.attach_volume(
@@ -439,15 +487,22 @@ def main():
                     latest_block_device = \
                         mongo_backups.get_latest_block_device()
                     time.sleep(1)
-                    print("DEBUG: waiting for new block device to attach.")
+                    mongo_backups.log(
+                        "Waiting for new block device to attach [{0}]."
+                        .format(attach_device)
+                    )
                     if last_block_device != latest_block_device:
-                        print(
-                            "DEBUG: new block device attached [{0}].".
+                        mongo_backups.log(
+                            "New block device attached [{0}].".
                             format(latest_block_device)
                         )
                         break
 
                 # Create a filesystem on the new block device.
+                mongo_backups.log(
+                    "Creating xfs filesystem [/dev/{0}].".
+                    format(latest_block_device)
+                )
                 subprocess.call(
                     'mkfs.xfs /dev/{0}'.
                     format(latest_block_device),
@@ -456,12 +511,17 @@ def main():
 
                 # Make a temporary mount points for the new volume and LVM
                 # snapshot.
+                mongo_backups.log("Creating temporary mount point directories.")
                 temp_mount_point_new_volume = tempfile.mkdtemp(
                     prefix='/media/'
                 )
                 temp_mount_point_lvsnap = tempfile.mkdtemp(prefix='/media/')
 
                 # Mount the new block device at temporary mount point.
+                mongo_backups.log(
+                    "Mounting new block device [dev=/dev/{0}, dest={1}].".
+                    format(latest_block_device, temp_mount_point_new_volume)
+                )
                 subprocess.call(
                     'mount /dev/{0} {1}'.
                     format(latest_block_device, temp_mount_point_new_volume),
@@ -470,11 +530,15 @@ def main():
 
                 # Lock mongo.
                 if args.mongo_lock:
-                    print("DEBUG: locking mongo.")
+                    mongo_backups.log("Locking mongo.")
                     conn = MongoClient('mongodb://127.0.0.1:27017')
                     conn.fsync(lock=True)
 
                 # Create LVM snapshot.
+                mongo_backups.log(
+                    "Creating LVM snapshot [vg={0}, lv={1}].".
+                    format(mongo_backups.vg_name, mongo_backups.lv_name)
+                )
                 subprocess.call(
                     'lvcreate -L300M -s -n lvsnap '
                     '/dev/mapper/{0}-{1}'
@@ -484,10 +548,19 @@ def main():
 
                 # Unlock mongo.
                 if args.mongo_lock:
-                    print("DEBUG: unlocking mongo.")
+                    mongo_backups.log("Unlocking mongo.")
                     conn.unlock()
 
                 # Mount LVM snapshot in read-only.
+                lvm_snapshot_mount_args = 'nouuid,ro'
+                mongo_backups.log(
+                    "Mounting LVM snapshot [mount_args={0}, "
+                    "dev=/dev/{1}/lvsnap, dest={2}].".
+                    format(
+                        lvm_snapshot_mount_args, mongo_backups.vg_name,
+                        temp_mount_point_lvsnap
+                    )
+                )
                 subprocess.call(
                     'mount -o nouuid,ro /dev/{0}/lvsnap {1}'.
                     format(mongo_backups.vg_name, temp_mount_point_lvsnap),
@@ -495,7 +568,10 @@ def main():
                 )
 
                 # Rsync LVM snapshot to new volume.
-                print("DEBUG: performing rsync.")
+                mongo_backups.log(
+                    "Performing rsync [src={0}, dest={1}].".
+                    format(temp_mount_point_lvsnap, temp_mount_point_new_volume)
+                )
                 rsync_output = subprocess.check_output(
                     'rsync -a --stats --delete --ignore-missing-args '
                     '-p {0}/* {1}/'.
@@ -528,8 +604,8 @@ def main():
 
                 # Create a snapshot of the new volume which now has a copy
                 # of the database.
-                print(
-                    "DEBUG: creating snapshot from volume [{0}]."
+                mongo_backups.log(
+                    "Creating snapshot from volume [{0}]."
                     .format(new_volume['VolumeId'])
                 )
                 snapshot = mongo_backups.ebs_create_snapshot(
@@ -537,9 +613,9 @@ def main():
                 )
 
                 # Detach the new volume.
-                print(
-                    "DEBUG: detaching new volume {0} which contains the "
-                    "database backup.".
+                mongo_backups.log(
+                    "Detaching volume which contains the database "
+                    "backup [{0}].".
                     format(new_volume['VolumeId'])
                 )
                 mongo_backups.ebs_detach_volume(
@@ -547,20 +623,25 @@ def main():
                 )
                 waiter = mongo_backups.client.get_waiter('volume_available')
                 waiter.wait(VolumeIds=[new_volume['VolumeId']])
-                print(
-                    "DEBUG: volume {0} detached.".
-                    format(new_volume['VolumeId'])
+                mongo_backups.log(
+                    "Volume detached [{0}].".format(new_volume['VolumeId'])
                 )
 
-                print(
-                    "DEBUG: deleting new volume {0}."
+                mongo_backups.log(
+                    "Deleting new volume [{0}]."
                     .format(new_volume['VolumeId'])
                 )
                 mongo_backups.ebs_delete_volume(new_volume['VolumeId'])
 
-                print(
-                    "DEBUG: backup complete on snapshot {0}"
+                mongo_backups.log(
+                    "Backup complete [snapshot_id={0}]."
                     .format(snapshot['SnapshotId'])
+                )
+
+                # Send snapshot tags to CloudWatch log stream.
+                mongo_backups.log(
+                    json.dumps(mongo_backups.snapshot_tags, indent=4),
+                    console=False
                 )
 
                 sys.exit(0)
