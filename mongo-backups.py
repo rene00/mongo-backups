@@ -69,6 +69,10 @@ def parse_args():
         help=('Lock Mongo before performing snapshot.')
     )
     parser.add_argument(
+        '--mongo-uri-file', dest='mongo_uri_file', default=None,
+        help=('File containing mongo URI connection string.')
+    )
+    parser.add_argument(
         '--seed-from-last-snapshot', dest='seed_from_last_snapshot',
         action='store_true', default=False,
         help=('Seed the volume from the last snapshot.')
@@ -91,8 +95,13 @@ class MongoBackups:
         # and will be used for reporting.
         self.stats = {}
 
+        # Logging attributes.
         self.log_group_name = kwargs.get('log_group_name')
         self.log_next_sequence_token = None
+
+        # Mongo connection and locking attributes.
+        self.mongo_lock = kwargs.get('mongo_lock')
+        self.mongo_uri_file = kwargs.get('mongo_uri_file')
 
     def log(self, message, console=True):
         """ Log message.
@@ -123,6 +132,23 @@ class MongoBackups:
                 kwargs['sequenceToken'] = self.log_next_sequence_token
             response = self.logs_client.put_log_events(**kwargs)
             self.log_next_sequence_token = response['nextSequenceToken']
+
+    @property
+    def mongo_uri(self):
+        """ Return mongo uri connection string from mongo_uri_file. """
+
+        mongo_uri = None
+        if self.mongo_lock and not self.mongo_uri_file:
+            raise Exception(
+                'You must provide a mongo_uri_file if mongo_lock '
+                'is set.'
+            )
+        if self.mongo_uri_file:
+            with open(self.mongo_uri_file) as fh:
+                mongo_uri = fh.read()
+            mongo_uri = mongo_uri.rstrip()
+
+        return mongo_uri
 
     @property
     def log_stream_name(self):
@@ -259,7 +285,7 @@ class MongoBackups:
 
         if snapshot_id:
             # wait till snapshot has completed first.
-            self.logs(
+            self.log(
                 "Checking that snapshot is complete [{0}].".
                 format(snapshot_id)
             )
@@ -404,7 +430,8 @@ def main():
 
     mongo_backups = MongoBackups(
         args.mongo_name, args.aws_region, args.vg_name, args.lv_name,
-        log_group_name=args.log_group_name
+        log_group_name=args.log_group_name, mongo_lock=args.mongo_lock,
+        mongo_uri_file=args.mongo_uri_file
     )
 
     mongo_backups.stats['date_started'] = dt.now().isoformat()
@@ -541,9 +568,9 @@ def main():
                 )
 
                 # Lock mongo.
-                if args.mongo_lock:
+                if mongo_backups.mongo_lock:
                     mongo_backups.log("Locking mongo.")
-                    conn = MongoClient('mongodb://127.0.0.1:27017')
+                    conn = MongoClient(mongo_backups.mongo_uri)
                     conn.fsync(lock=True)
 
                 # Create LVM snapshot.
@@ -559,7 +586,7 @@ def main():
                 )
 
                 # Unlock mongo.
-                if args.mongo_lock:
+                if mongo_backups.mongo_lock:
                     mongo_backups.log("Unlocking mongo.")
                     conn.unlock()
 
